@@ -1,0 +1,6 @@
+{
+  "name": "Reelo",
+  "description": "Movies, Anime, Cartoons and Drama catalog and streaming app",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
