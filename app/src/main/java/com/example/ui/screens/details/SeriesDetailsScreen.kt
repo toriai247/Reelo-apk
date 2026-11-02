@@ -340,12 +340,12 @@ fun SeriesDetailsScreen(
 
                         Spacer(modifier = Modifier.height(14.dp))
 
-                        // Big Yellow "▶ Watch" button
+                        // Big Yellow "▶ Watch" button (supports Continue Watching)
                         Button(
                             onClick = {
-                                val firstEp = filteredEpisodes.firstOrNull() ?: uiState.episodes.firstOrNull()
-                                if (firstEp != null) {
-                                    onWatchEpisode(series.id, firstEp.id)
+                                val targetEpId = uiState.continueEpisodeId ?: filteredEpisodes.firstOrNull()?.id ?: uiState.episodes.firstOrNull()?.id
+                                if (targetEpId != null) {
+                                    onWatchEpisode(series.id, targetEpId)
                                 }
                             },
                             colors = ButtonDefaults.buttonColors(
@@ -361,7 +361,7 @@ fun SeriesDetailsScreen(
                             Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null)
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "Watch Episode 1",
+                                text = uiState.continueWatchingText ?: "Watch Episode 1",
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 16.sp
                             )

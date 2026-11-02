@@ -3,9 +3,11 @@ package com.example.ui.screens.watch
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.pm.ActivityInfo
-import android.graphics.Bitmap
 import android.net.Uri
 import android.net.http.SslError
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -15,7 +17,6 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -35,8 +36,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -50,15 +49,25 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.webkit.ProxyConfig
 import androidx.webkit.ProxyController
+import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
-import com.example.data.model.Episode
 import com.example.ui.screens.report.ReportSourceDialog
+import com.example.ui.screens.watch.dialogs.BraveRecommendationDialog
+import com.example.ui.screens.watch.dialogs.OpenInBrowserSheet
+import com.example.ui.screens.watch.dialogs.SecureDnsGuideSheet
+import com.example.ui.screens.watch.dialogs.ShieldSettingsSheet
+import com.example.ui.screens.watch.helper.AdBlockerHelper
+import com.example.ui.screens.watch.helper.WatchScripts
 import com.example.ui.theme.ReeloBlack
 import com.example.ui.theme.ReeloYellow
 import com.example.ui.theme.SuccessGreen
 import kotlinx.coroutines.delay
+import org.json.JSONObject
 
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
@@ -71,6 +80,7 @@ fun WatchScreen(
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     val activity = context as? Activity
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var canGoBack by remember { mutableStateOf(false) }
@@ -78,6 +88,25 @@ fun WatchScreen(
     var customVideoView by remember { mutableStateOf<View?>(null) }
     var customViewCallback by remember { mutableStateOf<WebChromeClient.CustomViewCallback?>(null) }
     var swipeNotificationText by remember { mutableStateOf<String?>(null) }
+
+    // Initialize bundled ad domain blocklist
+    LaunchedEffect(Unit) {
+        AdBlockerHelper.init(context)
+        viewModel.refreshDnsStatus(context)
+    }
+
+    // Refresh DNS detection on app resume (Feature 3)
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshDnsStatus(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     // Keep screen on for watching
     DisposableEffect(Unit) {
@@ -120,7 +149,18 @@ fun WatchScreen(
         }
     }
 
-    // Configure Local DoH Proxy for WebView if enabled
+    // Handle resume seek command to HTML5 video (Feature 7)
+    LaunchedEffect(uiState.seekCommandId) {
+        val targetSec = uiState.targetSeekSeconds
+        if (targetSec != null) {
+            webViewRef?.evaluateJavascript(
+                "if (window.__reeloExecuteCommand) { window.__reeloExecuteCommand({type: 'seek', time: $targetSec}); }",
+                null
+            )
+        }
+    }
+
+    // Configure Local DoH Proxy for WebView if enabled (default false)
     DisposableEffect(uiState.useSecureDns) {
         if (uiState.useSecureDns && WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
             val port = viewModel.startLocalProxy()
@@ -151,7 +191,7 @@ fun WatchScreen(
         }
     }
 
-    // Hardware Back Handling: Custom fullscreen -> WebView goBack -> Exit landscape -> Close WatchScreen
+    // Hardware Back Handling
     BackHandler {
         if (customVideoView != null) {
             customViewCallback?.onCustomViewHidden()
@@ -164,6 +204,59 @@ fun WatchScreen(
         } else {
             onExit()
         }
+    }
+
+    // =========================================================================
+    // DIALOGS & BOTTOM SHEETS
+    // =========================================================================
+
+    // Feature 1: Open in Browser Sheet
+    if (uiState.showOpenInBrowserSheet) {
+        OpenInBrowserSheet(
+            originalUrl = uiState.currentSource?.url ?: "",
+            currentUrl = uiState.currentPageUrl,
+            onDismiss = { viewModel.toggleOpenInBrowserSheet(false) },
+            onOpenSecureDnsGuide = { viewModel.toggleSecureDnsSheet(true) }
+        )
+    }
+
+    // Feature 2: Brave Recommendation Popup
+    if (uiState.showBraveDialog) {
+        BraveRecommendationDialog(
+            originalUrl = uiState.currentSource?.url ?: "",
+            onDismiss = { viewModel.dismissBraveDialog() },
+            onDontShowAgain = { viewModel.setBraveDontShowAgain() }
+        )
+    }
+
+    // Feature 3: Guided Secure DNS Sheet
+    if (uiState.showSecureDnsSheet) {
+        SecureDnsGuideSheet(
+            dnsStatus = uiState.dnsStatus,
+            onDismiss = { viewModel.toggleSecureDnsSheet(false) },
+            onReloadStream = { webViewRef?.reload() }
+        )
+    }
+
+    // Feature 4, 5, 6: Shield & Ad Protection Settings Sheet
+    if (uiState.showShieldSheet) {
+        val currentHost = Uri.parse(uiState.currentPageUrl ?: uiState.currentSource?.url ?: "").host
+        val isHostDisabled = currentHost != null && uiState.disabledShieldHosts.contains(currentHost.lowercase())
+
+        ShieldSettingsSheet(
+            stayOnOriginalSite = uiState.stayOnOriginalSite,
+            adCleanerEnabled = uiState.adCleanerEnabled,
+            popupGatedPlayers = uiState.popupGatedPlayers,
+            isShieldDisabledForCurrentHost = isHostDisabled,
+            currentHost = currentHost,
+            blockedRedirectsCount = uiState.blockedRedirectsCount,
+            onToggleStayOnOriginalSite = { viewModel.toggleStayOnOriginalSite(it) },
+            onToggleAdCleaner = { viewModel.toggleAdCleaner(it) },
+            onTogglePopupGatedPlayers = { viewModel.togglePopupGatedPlayers(it) },
+            onToggleShieldForCurrentHost = { viewModel.toggleShieldForCurrentHost() },
+            onResetBlockedCount = { viewModel.resetBlockedCount() },
+            onDismiss = { viewModel.toggleShieldSheet(false) }
+        )
     }
 
     // Report Source Dialog
@@ -187,16 +280,6 @@ fun WatchScreen(
             onLikeComment = { viewModel.toggleCommentLike(it) },
             onRequireLogin = { /* Login prompt */ }
         )
-    }
-
-    // Report Submitted Confirmation Toast
-    val reportToast = uiState.reportSubmittedToast
-    if (reportToast != null) {
-        LaunchedEffect(reportToast) {
-            swipeNotificationText = reportToast
-            delay(2500)
-            viewModel.dismissReportToast()
-        }
     }
 
     // Servers & Controls Bottom Sheet
@@ -224,7 +307,6 @@ fun WatchScreen(
                         color = ReeloYellow
                     )
 
-                    // User-Agent Switcher Pill
                     Surface(
                         color = Color(0xFF333333),
                         shape = RoundedCornerShape(16.dp),
@@ -334,14 +416,15 @@ fun WatchScreen(
         }
     }
 
+    // =========================================================================
     // MAIN CONTAINER
+    // =========================================================================
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
         if (customVideoView != null) {
-            // HTML5 Website Fullscreen Override
             AndroidView(
                 factory = {
                     (customVideoView?.parent as? ViewGroup)?.removeView(customVideoView)
@@ -351,7 +434,7 @@ fun WatchScreen(
             )
         } else if (!uiState.isLandscapeMode) {
             // =========================================================
-            // 9:16 VERTICAL REEL PORTRAIT LAYOUT (DEFAULT)
+            // 9:16 VERTICAL REEL PORTRAIT LAYOUT
             // =========================================================
             Column(modifier = Modifier.fillMaxSize()) {
                 // Top Header Bar
@@ -359,8 +442,8 @@ fun WatchScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .statusBarsPadding()
-                        .height(38.dp)
-                        .padding(horizontal = 10.dp, vertical = 2.dp),
+                        .height(44.dp)
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
@@ -380,13 +463,13 @@ fun WatchScreen(
                                 tint = Color.White
                             )
                         }
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
                         Column {
                             Text(
                                 text = uiState.series?.title ?: "Watching Episode",
                                 color = Color.White,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 15.sp,
+                                fontSize = 14.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -394,7 +477,7 @@ fun WatchScreen(
                             Text(
                                 text = if (ep != null) "S${ep.seasonNumber}:E${ep.episodeNumber} - ${ep.title}" else "Loading episode...",
                                 color = ReeloYellow,
-                                fontSize = 12.sp,
+                                fontSize = 11.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -403,30 +486,55 @@ fun WatchScreen(
 
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        // User Agent Switch Button
-                        Surface(
-                            color = Color(0xFF222222),
-                            shape = CircleShape,
-                            modifier = Modifier.clickable { viewModel.toggleUserAgentMode() }
+                        // Globe Icon: Open in Browser (Feature 1)
+                        IconButton(
+                            onClick = { viewModel.toggleOpenInBrowserSheet(true) },
+                            modifier = Modifier
+                                .size(34.dp)
+                                .background(Color(0xFF222222), CircleShape)
                         ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                            Icon(
+                                imageVector = Icons.Default.Language,
+                                contentDescription = "Open in browser",
+                                tint = ReeloYellow,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        // Shield Icon with Blocked Count Badge (Feature 4, 5, 6)
+                        Box {
+                            IconButton(
+                                onClick = { viewModel.toggleShieldSheet(true) },
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .background(Color(0xFF222222), CircleShape)
                             ) {
                                 Icon(
-                                    imageVector = if (uiState.userAgentMode == UserAgentMode.MOBILE) Icons.Default.PhoneAndroid else Icons.Default.Computer,
-                                    contentDescription = "User Agent",
-                                    tint = ReeloYellow,
-                                    modifier = Modifier.size(14.dp)
+                                    imageVector = Icons.Default.Shield,
+                                    contentDescription = "Shield & Ad Control",
+                                    tint = if (uiState.blockedRedirectsCount > 0) ReeloYellow else Color.LightGray,
+                                    modifier = Modifier.size(18.dp)
                                 )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = uiState.userAgentMode.label,
-                                    fontSize = 10.sp,
-                                    color = Color.LightGray
-                                )
+                            }
+                            if (uiState.blockedRedirectsCount > 0) {
+                                Surface(
+                                    color = Color.Red,
+                                    shape = CircleShape,
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .size(14.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text(
+                                            text = "${uiState.blockedRedirectsCount}",
+                                            color = Color.White,
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
                             }
                         }
 
@@ -434,7 +542,7 @@ fun WatchScreen(
                         IconButton(
                             onClick = { viewModel.toggleLandscapeMode() },
                             modifier = Modifier
-                                .size(36.dp)
+                                .size(34.dp)
                                 .background(Color(0xFF222222), CircleShape)
                                 .testTag("toggle_landscape_button")
                         ) {
@@ -442,13 +550,13 @@ fun WatchScreen(
                                 imageVector = Icons.Default.ScreenRotation,
                                 contentDescription = "16:9 Landscape Mode",
                                 tint = ReeloYellow,
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(18.dp)
                             )
                         }
                     }
                 }
 
-                // Central Reel Container (WebView + Gestures + Side Action Bar)
+                // Central Reel Container
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -457,138 +565,26 @@ fun WatchScreen(
                 ) {
                     val sourceUrl = uiState.currentSource?.url
                     if (!sourceUrl.isNullOrBlank() && !uiState.hasError) {
-                        // Embedded Universal WebView Player
                         AndroidView(
                             factory = { ctx ->
-                                WebView(ctx).apply {
-                                    layoutParams = ViewGroup.LayoutParams(
-                                        ViewGroup.LayoutParams.MATCH_PARENT,
-                                        ViewGroup.LayoutParams.MATCH_PARENT
-                                    )
-                                    setBackgroundColor(android.graphics.Color.BLACK)
-
-                                    settings.apply {
-                                        javaScriptEnabled = true
-                                        domStorageEnabled = true
-                                        databaseEnabled = true
-                                        mediaPlaybackRequiresUserGesture = false
-                                        allowFileAccess = false
-                                        allowContentAccess = false
-                                        setGeolocationEnabled(false)
-                                        mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                                        loadWithOverviewMode = true
-                                        useWideViewPort = true
-                                        userAgentString = uiState.userAgentMode.value
-                                    }
-
-                                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-
-                                    webChromeClient = object : WebChromeClient() {
-                                        override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                                            viewModel.setWebViewProgress(newProgress)
-                                        }
-
-                                        override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
-                                            customVideoView = view
-                                            customViewCallback = callback
-                                        }
-
-                                        override fun onHideCustomView() {
-                                            customViewCallback?.onCustomViewHidden()
-                                            customVideoView = null
-                                            customViewCallback = null
-                                        }
-
-                                        override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?): Boolean {
-                                            return uiState.allowPopups
-                                        }
-
-                                        override fun onPermissionRequest(request: PermissionRequest?) {
-                                            request?.deny()
-                                        }
-                                    }
-
-                                    webViewClient = object : WebViewClient() {
-                                        override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
-                                            view?.let {
-                                                (it.parent as? ViewGroup)?.removeView(it)
-                                                it.destroy()
-                                            }
-                                            webViewRef = null
-                                            viewModel.onWebPageError("Stream process stopped. Please try next server.")
-                                            return true
-                                        }
-
-                                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                                            val uri = request?.url ?: return false
-                                            val scheme = uri.scheme?.lowercase()
-
-                                            if (scheme != "http" && scheme != "https") {
-                                                return true
-                                            }
-
-                                            val currentHost = Uri.parse(view?.url ?: "").host
-                                            val newHost = uri.host
-                                            if (!request.hasGesture() && currentHost != null && newHost != null && !currentHost.equals(newHost, ignoreCase = true)) {
-                                                return true
-                                            }
-
-                                            return false
-                                        }
-
-                                        override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
-                                            handler?.cancel()
-                                            viewModel.onWebPageError("SSL Security Verification Failed")
-                                        }
-
-                                        override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
-                                            if (request?.isForMainFrame == true) {
-                                                viewModel.onWebPageError("Failed to load stream page (${error?.description})")
-                                            }
-                                        }
-
-                                        override fun onPageFinished(view: WebView?, url: String?) {
-                                            canGoBack = view?.canGoBack() ?: false
-                                            canGoForward = view?.canGoForward() ?: false
-                                        }
-                                    }
-
-                                    // Pass Universal Web URL headers (Referer, Origin, User-Agent)
-                                    val uri = Uri.parse(sourceUrl)
-                                    val host = uri.host ?: ""
-                                    val headers = mutableMapOf<String, String>()
-                                    if (host.isNotEmpty()) {
-                                        headers["Referer"] = "${uri.scheme ?: "https"}://$host/"
-                                        headers["Origin"] = "${uri.scheme ?: "https"}://$host"
-                                    }
-                                    headers["User-Agent"] = uiState.userAgentMode.value
-                                    loadUrl(sourceUrl, headers)
-
-                                    webViewRef = this
-                                }
+                                createConfiguredWebView(
+                                    context = ctx,
+                                    viewModel = viewModel,
+                                    sourceUrl = sourceUrl,
+                                    onShowCustomView = { v, cb -> customVideoView = v; customViewCallback = cb },
+                                    onHideCustomView = { customViewCallback?.onCustomViewHidden(); customVideoView = null; customViewCallback = null },
+                                    onUpdateNavState = { back, fwd -> canGoBack = back; canGoForward = fwd },
+                                    onAttach = { webViewRef = it }
+                                )
                             },
                             update = { view ->
-                                view.settings.userAgentString = uiState.userAgentMode.value
-                                if (view.url != sourceUrl && !sourceUrl.isNullOrBlank()) {
-                                    view.clearHistory()
-                                    val uri = Uri.parse(sourceUrl)
-                                    val host = uri.host ?: ""
-                                    val headers = mutableMapOf<String, String>()
-                                    if (host.isNotEmpty()) {
-                                        headers["Referer"] = "${uri.scheme ?: "https"}://$host/"
-                                        headers["Origin"] = "${uri.scheme ?: "https"}://$host"
-                                    }
-                                    headers["User-Agent"] = uiState.userAgentMode.value
-                                    view.loadUrl(sourceUrl, headers)
-                                    canGoBack = false
-                                    canGoForward = false
-                                }
+                                updateWebView(view, viewModel, sourceUrl, uiState.userAgentMode.value)
                             },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
 
-                    // Gesture Layer: Detect double-tap to like & vertical drag to switch episode
+                    // Gestures: double tap to like & vertical drag for episode switch
                     var dragYAccumulator by remember { mutableFloatStateOf(0f) }
                     Box(
                         modifier = Modifier
@@ -642,22 +638,63 @@ fun WatchScreen(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
-                        androidx.compose.animation.AnimatedVisibility(
-                            visible = swipeNotificationText != null,
-                            enter = fadeIn() + slideInVertically(),
-                            exit = fadeOut() + slideOutVertically()
-                        ) {
-                            Surface(
-                                color = Color.Black.copy(alpha = 0.8f),
-                                shape = RoundedCornerShape(20.dp),
-                                border = BorderStroke(1.dp, ReeloYellow)
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            AnimatedVisibility(
+                                visible = swipeNotificationText != null,
+                                enter = fadeIn() + slideInVertically(),
+                                exit = fadeOut() + slideOutVertically()
                             ) {
+                                Surface(
+                                    color = Color.Black.copy(alpha = 0.8f),
+                                    shape = RoundedCornerShape(20.dp),
+                                    border = BorderStroke(1.dp, ReeloYellow)
+                                ) {
+                                    Text(
+                                        text = swipeNotificationText ?: "",
+                                        color = ReeloYellow,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp,
+                                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Feature 7: Resume Playback Floating Chip
+                    if (uiState.showResumeChip && !uiState.resumeChipText.isNullOrBlank()) {
+                        Surface(
+                            color = Color(0xF01A1A1A),
+                            shape = RoundedCornerShape(24.dp),
+                            border = BorderStroke(1.dp, ReeloYellow),
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(top = 16.dp)
+                                .clickable { viewModel.startOverPlayback() }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PlayArrow,
+                                    contentDescription = null,
+                                    tint = ReeloYellow,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = swipeNotificationText ?: "",
+                                    text = uiState.resumeChipText ?: "",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Start over",
                                     color = ReeloYellow,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 14.sp,
-                                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp)
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
                                 )
                             }
                         }
@@ -674,6 +711,48 @@ fun WatchScreen(
                                 .height(3.dp)
                                 .align(Alignment.TopCenter)
                         )
+                    }
+
+                    // Feature 4: Ad Redirect Blocked Snackbar with "Allow once" (5s)
+                    val blockedToast = uiState.blockedRedirectToast
+                    if (blockedToast != null) {
+                        LaunchedEffect(blockedToast) {
+                            delay(5000)
+                            viewModel.dismissBlockedToast()
+                        }
+                        Surface(
+                            color = Color(0xF0202020),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, Color(0xFF444444)),
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 16.dp, start = 16.dp, end = 16.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Shield,
+                                    contentDescription = null,
+                                    tint = ReeloYellow,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = blockedToast,
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                TextButton(
+                                    onClick = { viewModel.triggerAllowOnce() },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text("Allow once (5s)", color = ReeloYellow, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                }
+                            }
+                        }
                     }
 
                     // Error Overlay
@@ -731,7 +810,6 @@ fun WatchScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        // Like Button
                         IconButton(
                             onClick = { viewModel.toggleLike() },
                             modifier = Modifier
@@ -746,7 +824,6 @@ fun WatchScreen(
                             )
                         }
 
-                        // Comments Button
                         IconButton(
                             onClick = { viewModel.toggleCommentsSheet(true) },
                             modifier = Modifier
@@ -762,7 +839,6 @@ fun WatchScreen(
                             )
                         }
 
-                        // Servers / Settings
                         IconButton(
                             onClick = { viewModel.toggleServersSheet(true) },
                             modifier = Modifier
@@ -778,7 +854,6 @@ fun WatchScreen(
                             )
                         }
 
-                        // Report Problem
                         IconButton(
                             onClick = { viewModel.toggleReportDialog(true) },
                             modifier = Modifier
@@ -803,7 +878,6 @@ fun WatchScreen(
                         .navigationBarsPadding()
                         .padding(vertical = 8.dp)
                 ) {
-                    // Playback Navigation Row
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -834,7 +908,6 @@ fun WatchScreen(
                         }
                     }
 
-                    // Episode Number Horizontal Selector Pills
                     val rightRailEpisodes = uiState.episodes.filter {
                         if (uiState.seasons.size > 1) it.seasonNumber == uiState.selectedSeasonNumber else true
                     }
@@ -885,7 +958,7 @@ fun WatchScreen(
             // 16:9 LANDSCAPE FULLSCREEN LAYOUT
             // =========================================================
             Row(modifier = Modifier.fillMaxSize()) {
-                // Left Navigation Rail
+                // Left Navigation Rail: back, forward, reload, exit, servers, browser, shield
                 AnimatedVisibility(
                     visible = uiState.railsExpanded,
                     enter = slideInHorizontally(initialOffsetX = { -it }),
@@ -896,18 +969,19 @@ fun WatchScreen(
                             .width(52.dp)
                             .fillMaxHeight()
                             .background(Color(0xE6141414))
-                            .padding(vertical = 12.dp),
+                            .padding(vertical = 8.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.SpaceBetween
                     ) {
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
+                            // Exit / Switch to portrait
                             IconButton(
                                 onClick = { viewModel.toggleLandscapeMode() },
                                 modifier = Modifier
-                                    .size(38.dp)
+                                    .size(36.dp)
                                     .testTag("watch_exit_button")
                             ) {
                                 Icon(
@@ -917,10 +991,11 @@ fun WatchScreen(
                                 )
                             }
 
+                            // Browser Back
                             IconButton(
                                 onClick = { webViewRef?.goBack() },
                                 enabled = canGoBack,
-                                modifier = Modifier.size(38.dp)
+                                modifier = Modifier.size(36.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
@@ -929,9 +1004,23 @@ fun WatchScreen(
                                 )
                             }
 
+                            // Browser Forward
+                            IconButton(
+                                onClick = { webViewRef?.goForward() },
+                                enabled = canGoForward,
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                    contentDescription = "Browser Forward",
+                                    tint = if (canGoForward) ReeloYellow else Color.DarkGray
+                                )
+                            }
+
+                            // Reload Page
                             IconButton(
                                 onClick = { webViewRef?.reload() },
-                                modifier = Modifier.size(38.dp)
+                                modifier = Modifier.size(36.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Refresh,
@@ -939,12 +1028,69 @@ fun WatchScreen(
                                     tint = ReeloYellow
                                 )
                             }
+
+                            // Exit Button
+                            IconButton(
+                                onClick = onExit,
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Exit to Details",
+                                    tint = Color.White
+                                )
+                            }
+
+                            // Feature 1: Open in Browser (Globe Icon)
+                            IconButton(
+                                onClick = { viewModel.toggleOpenInBrowserSheet(true) },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Language,
+                                    contentDescription = "Open in Browser",
+                                    tint = ReeloYellow
+                                )
+                            }
+
+                            // Feature 4, 5, 6: Shield Icon with Badge
+                            Box {
+                                IconButton(
+                                    onClick = { viewModel.toggleShieldSheet(true) },
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Shield,
+                                        contentDescription = "Shield Protection",
+                                        tint = if (uiState.blockedRedirectsCount > 0) ReeloYellow else Color.LightGray
+                                    )
+                                }
+                                if (uiState.blockedRedirectsCount > 0) {
+                                    Surface(
+                                        color = Color.Red,
+                                        shape = CircleShape,
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .size(14.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Text(
+                                                text = "${uiState.blockedRedirectsCount}",
+                                                color = Color.White,
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
 
+                        // Servers Button
                         IconButton(
                             onClick = { viewModel.toggleServersSheet(true) },
                             modifier = Modifier
-                                .size(40.dp)
+                                .size(38.dp)
                                 .testTag("watch_servers_button")
                         ) {
                             Icon(
@@ -967,131 +1113,102 @@ fun WatchScreen(
                     if (!sourceUrl.isNullOrBlank() && !uiState.hasError) {
                         AndroidView(
                             factory = { ctx ->
-                                WebView(ctx).apply {
-                                    layoutParams = ViewGroup.LayoutParams(
-                                        ViewGroup.LayoutParams.MATCH_PARENT,
-                                        ViewGroup.LayoutParams.MATCH_PARENT
-                                    )
-                                    setBackgroundColor(android.graphics.Color.BLACK)
-
-                                    settings.apply {
-                                        javaScriptEnabled = true
-                                        domStorageEnabled = true
-                                        databaseEnabled = true
-                                        mediaPlaybackRequiresUserGesture = false
-                                        allowFileAccess = false
-                                        allowContentAccess = false
-                                        setGeolocationEnabled(false)
-                                        mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                                        loadWithOverviewMode = true
-                                        useWideViewPort = true
-                                        userAgentString = uiState.userAgentMode.value
-                                    }
-
-                                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-
-                                    webChromeClient = object : WebChromeClient() {
-                                        override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                                            viewModel.setWebViewProgress(newProgress)
-                                        }
-
-                                        override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
-                                            customVideoView = view
-                                            customViewCallback = callback
-                                        }
-
-                                        override fun onHideCustomView() {
-                                            customViewCallback?.onCustomViewHidden()
-                                            customVideoView = null
-                                            customViewCallback = null
-                                        }
-
-                                        override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?): Boolean {
-                                            return uiState.allowPopups
-                                        }
-
-                                        override fun onPermissionRequest(request: PermissionRequest?) {
-                                            request?.deny()
-                                        }
-                                    }
-
-                                    webViewClient = object : WebViewClient() {
-                                        override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
-                                            view?.let {
-                                                (it.parent as? ViewGroup)?.removeView(it)
-                                                it.destroy()
-                                            }
-                                            webViewRef = null
-                                            viewModel.onWebPageError("Stream process stopped. Please try next server.")
-                                            return true
-                                        }
-
-                                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                                            val uri = request?.url ?: return false
-                                            val scheme = uri.scheme?.lowercase()
-
-                                            if (scheme != "http" && scheme != "https") {
-                                                return true
-                                            }
-
-                                            val currentHost = Uri.parse(view?.url ?: "").host
-                                            val newHost = uri.host
-                                            if (!request.hasGesture() && currentHost != null && newHost != null && !currentHost.equals(newHost, ignoreCase = true)) {
-                                                return true
-                                            }
-
-                                            return false
-                                        }
-
-                                        override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
-                                            handler?.cancel()
-                                            viewModel.onWebPageError("SSL Security Verification Failed")
-                                        }
-
-                                        override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
-                                            if (request?.isForMainFrame == true) {
-                                                viewModel.onWebPageError("Failed to load stream page (${error?.description})")
-                                            }
-                                        }
-
-                                        override fun onPageFinished(view: WebView?, url: String?) {
-                                            canGoBack = view?.canGoBack() ?: false
-                                            canGoForward = view?.canGoForward() ?: false
-                                        }
-                                    }
-
-                                    val uri = Uri.parse(sourceUrl)
-                                    val host = uri.host ?: ""
-                                    val headers = mutableMapOf<String, String>()
-                                    if (host.isNotEmpty()) {
-                                        headers["Referer"] = "${uri.scheme ?: "https"}://$host/"
-                                        headers["Origin"] = "${uri.scheme ?: "https"}://$host"
-                                    }
-                                    headers["User-Agent"] = uiState.userAgentMode.value
-                                    loadUrl(sourceUrl, headers)
-
-                                    webViewRef = this
-                                }
+                                createConfiguredWebView(
+                                    context = ctx,
+                                    viewModel = viewModel,
+                                    sourceUrl = sourceUrl,
+                                    onShowCustomView = { v, cb -> customVideoView = v; customViewCallback = cb },
+                                    onHideCustomView = { customViewCallback?.onCustomViewHidden(); customVideoView = null; customViewCallback = null },
+                                    onUpdateNavState = { back, fwd -> canGoBack = back; canGoForward = fwd },
+                                    onAttach = { webViewRef = it }
+                                )
                             },
                             update = { view ->
-                                view.settings.userAgentString = uiState.userAgentMode.value
-                                if (view.url != sourceUrl && !sourceUrl.isNullOrBlank()) {
-                                    view.clearHistory()
-                                    val uri = Uri.parse(sourceUrl)
-                                    val host = uri.host ?: ""
-                                    val headers = mutableMapOf<String, String>()
-                                    if (host.isNotEmpty()) {
-                                        headers["Referer"] = "${uri.scheme ?: "https"}://$host/"
-                                        headers["Origin"] = "${uri.scheme ?: "https"}://$host"
-                                    }
-                                    headers["User-Agent"] = uiState.userAgentMode.value
-                                    view.loadUrl(sourceUrl, headers)
-                                    canGoBack = false
-                                    canGoForward = false
-                                }
+                                updateWebView(view, viewModel, sourceUrl, uiState.userAgentMode.value)
                             },
                             modifier = Modifier.fillMaxSize()
                         )
+                    }
+
+                    // Feature 7: Resume Playback Floating Chip (Landscape)
+                    if (uiState.showResumeChip && !uiState.resumeChipText.isNullOrBlank()) {
+                        Surface(
+                            color = Color(0xF01A1A1A),
+                            shape = RoundedCornerShape(24.dp),
+                            border = BorderStroke(1.dp, ReeloYellow),
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(top = 16.dp)
+                                .clickable { viewModel.startOverPlayback() }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PlayArrow,
+                                    contentDescription = null,
+                                    tint = ReeloYellow,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = uiState.resumeChipText ?: "",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Start over",
+                                    color = ReeloYellow,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
+                    // Feature 4: Ad Redirect Blocked Snackbar with "Allow once" (5s) (Landscape)
+                    val blockedToast = uiState.blockedRedirectToast
+                    if (blockedToast != null) {
+                        LaunchedEffect(blockedToast) {
+                            delay(5000)
+                            viewModel.dismissBlockedToast()
+                        }
+                        Surface(
+                            color = Color(0xF0202020),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, Color(0xFF444444)),
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 16.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Shield,
+                                    contentDescription = null,
+                                    tint = ReeloYellow,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = blockedToast,
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                TextButton(
+                                    onClick = { viewModel.triggerAllowOnce() },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text("Allow once (5s)", color = ReeloYellow, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                }
+                            }
+                        }
                     }
 
                     if (uiState.webViewProgress in 1..99) {
@@ -1184,4 +1301,269 @@ fun WatchScreen(
             }
         }
     }
+}
+
+// =============================================================================
+// WEBVIEW CONFIGURATION & SECURITY INTERCEPTION
+// =============================================================================
+
+@SuppressLint("SetJavaScriptEnabled")
+private fun createConfiguredWebView(
+    context: android.content.Context,
+    viewModel: WatchViewModel,
+    sourceUrl: String,
+    onShowCustomView: (View?, WebChromeClient.CustomViewCallback?) -> Unit,
+    onHideCustomView: () -> Unit,
+    onUpdateNavState: (Boolean, Boolean) -> Unit,
+    onAttach: (WebView) -> Unit
+): WebView {
+    return WebView(context).apply {
+        layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        setBackgroundColor(android.graphics.Color.BLACK)
+
+        settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            databaseEnabled = true
+            mediaPlaybackRequiresUserGesture = false
+            allowFileAccess = false
+            allowContentAccess = false
+            setGeolocationEnabled(false)
+            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            loadWithOverviewMode = true
+            useWideViewPort = true
+            userAgentString = viewModel.uiState.value.userAgentMode.value
+        }
+
+        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+
+        // Feature 5 & 7: Inject Document Start Scripts (Main frame + subframes)
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            WebViewCompat.addDocumentStartJavaScript(this, WatchScripts.AD_CLEANER_JS, setOf("*"))
+            WebViewCompat.addDocumentStartJavaScript(this, WatchScripts.VIDEO_RESUME_BRIDGE_JS, setOf("*"))
+        }
+
+        // Feature 7: WebMessageListener for ReeloBridge communication
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+            WebViewCompat.addWebMessageListener(this, "ReeloBridge", setOf("*")) { view, message, sourceOrigin, isMainFrame, replyProxy ->
+                try {
+                    val rawData = message.data
+                    if (!rawData.isNullOrBlank()) {
+                        val json = JSONObject(rawData)
+                        when (json.optString("type")) {
+                            "ready" -> {
+                                val dur = json.optInt("duration", 0)
+                                viewModel.onVideoReady(dur)
+                            }
+                            "timeupdate" -> {
+                                val cur = json.optInt("currentTime", 0)
+                                val dur = json.optInt("duration", 0)
+                                val ended = json.optBoolean("ended", false)
+                                viewModel.onVideoTimeUpdate(cur, dur, ended)
+                            }
+                            "no_video" -> {
+                                viewModel.onNoVideoFound()
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("ReeloResume", "Bridge message error: ${e.message}")
+                }
+            }
+        }
+
+        webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                viewModel.setWebViewProgress(newProgress)
+            }
+
+            override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                onShowCustomView(view, callback)
+            }
+
+            override fun onHideCustomView() {
+                onHideCustomView()
+            }
+
+            // Feature 6: Window / Popup Handling
+            override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?): Boolean {
+                val state = viewModel.uiState.value
+                if (state.popupGatedPlayers) {
+                    // Headless unattached background WebView to satisfy popup requirement without disturbing video
+                    Log.d("ReeloAds", "Loading popup-gated player window in headless background WebView")
+                    val headless = WebView(context).apply {
+                        settings.javaScriptEnabled = true
+                        webViewClient = object : WebViewClient() {
+                            override fun onPageFinished(v: WebView?, url: String?) {
+                                Handler(Looper.getMainLooper()).postDelayed({ destroy() }, 1000)
+                            }
+                        }
+                    }
+                    val transport = resultMsg?.obj as? WebView.WebViewTransport
+                    transport?.webView = headless
+                    resultMsg?.sendToTarget()
+
+                    // Safety timeout: destroy headless after 2.5s
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        runCatching { headless.destroy() }
+                    }, 2500)
+                    return true
+                }
+                // Default DENY popups
+                return false
+            }
+
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                request?.deny()
+            }
+        }
+
+        webViewClient = object : WebViewClient() {
+            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                view?.let {
+                    (it.parent as? ViewGroup)?.removeView(it)
+                    it.destroy()
+                }
+                viewModel.onWebPageError("Stream process stopped. Please try next server.")
+                return true
+            }
+
+            // Feature 4: Main-frame navigation intercept (Stay on original site)
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                val uri = request?.url ?: return false
+                val scheme = uri.scheme?.lowercase()
+
+                // Block non-http(s) schemes like market://, intent://
+                if (scheme != "http" && scheme != "https") {
+                    Log.d("ReeloNav", "Blocked non-http(s) scheme: $uri")
+                    return true
+                }
+
+                // Subframe / iframe requests are permitted for video players
+                if (request.isForMainFrame == false) {
+                    return false
+                }
+
+                val newHost = uri.host
+                if (!viewModel.isHostTrusted(newHost)) {
+                    viewModel.onAdRedirectBlocked(uri.toString())
+                    return true // Block navigation
+                }
+
+                viewModel.updateCurrentPageUrl(uri.toString())
+                return false
+            }
+
+            // Safety net: in onPageStarted, inspect main frame URL
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                if (url.isNullOrBlank()) return
+
+                viewModel.updateCurrentPageUrl(url)
+                val uri = Uri.parse(url)
+                val host = uri.host
+
+                // If before user interaction, record initial server redirect as trusted
+                viewModel.addInitialRedirectHost(url)
+
+                if (!viewModel.isHostTrusted(host)) {
+                    Log.d("ReeloNav", "Safety net caught untrusted host: $host, reversing navigation")
+                    view?.stopLoading()
+                    viewModel.onAdRedirectBlocked(url)
+
+                    val backList = view?.copyBackForwardList()
+                    var returned = false
+                    if (backList != null && backList.size > 1) {
+                        for (i in backList.currentIndex - 1 downTo 0) {
+                            val item = backList.getItemAtIndex(i)
+                            val itemHost = Uri.parse(item.url).host
+                            if (viewModel.isHostTrusted(itemHost)) {
+                                view.goBackOrForward(i - backList.currentIndex)
+                                returned = true
+                                break
+                            }
+                        }
+                    }
+                    if (!returned && !sourceUrl.isNullOrBlank()) {
+                        val headers = createUniversalHeaders(sourceUrl, viewModel.uiState.value.userAgentMode.value)
+                        view?.loadUrl(sourceUrl, headers)
+                    }
+                }
+            }
+
+            override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                super.doUpdateVisitedHistory(view, url, isReload)
+                if (url.isNullOrBlank()) return
+
+                val host = Uri.parse(url).host
+                if (!viewModel.isHostTrusted(host)) {
+                    Log.d("ReeloNav", "History update detected untrusted host: $host, stopping")
+                    view?.stopLoading()
+                    viewModel.onAdRedirectBlocked(url)
+                    view?.loadUrl(sourceUrl, createUniversalHeaders(sourceUrl, viewModel.uiState.value.userAgentMode.value))
+                }
+            }
+
+            // Feature 5: Sub-resource ad domain blocking
+            override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                if (viewModel.uiState.value.adCleanerEnabled) {
+                    val host = request?.url?.host
+                    if (AdBlockerHelper.isAdHost(host)) {
+                        Log.d("ReeloAds", "Intercepted ad subresource: ${request?.url}")
+                        return AdBlockerHelper.createEmptyResponse()
+                    }
+                }
+                return super.shouldInterceptRequest(view, request)
+            }
+
+            override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
+                handler?.cancel()
+                viewModel.onWebPageError("SSL Security Verification Failed")
+            }
+
+            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                if (request?.isForMainFrame == true) {
+                    viewModel.onWebPageError("Failed to load stream page (${error?.description})")
+                }
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                onUpdateNavState(view?.canGoBack() ?: false, view?.canGoForward() ?: false)
+
+                // Fallback script evaluation if DOCUMENT_START_SCRIPT is unsupported
+                if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                    view?.evaluateJavascript(WatchScripts.AD_CLEANER_JS, null)
+                    view?.evaluateJavascript(WatchScripts.VIDEO_RESUME_BRIDGE_JS, null)
+                }
+            }
+        }
+
+        val headers = createUniversalHeaders(sourceUrl, viewModel.uiState.value.userAgentMode.value)
+        loadUrl(sourceUrl, headers)
+        onAttach(this)
+    }
+}
+
+private fun updateWebView(view: WebView, viewModel: WatchViewModel, sourceUrl: String?, userAgent: String) {
+    view.settings.userAgentString = userAgent
+    if (view.url != sourceUrl && !sourceUrl.isNullOrBlank()) {
+        view.clearHistory()
+        val headers = createUniversalHeaders(sourceUrl, userAgent)
+        view.loadUrl(sourceUrl, headers)
+    }
+}
+
+private fun createUniversalHeaders(url: String, userAgent: String): Map<String, String> {
+    val uri = Uri.parse(url)
+    val host = uri.host ?: ""
+    val headers = mutableMapOf<String, String>()
+    if (host.isNotEmpty()) {
+        headers["Referer"] = "${uri.scheme ?: "https"}://$host/"
+        headers["Origin"] = "${uri.scheme ?: "https"}://$host"
+    }
+    headers["User-Agent"] = userAgent
+    return headers
 }

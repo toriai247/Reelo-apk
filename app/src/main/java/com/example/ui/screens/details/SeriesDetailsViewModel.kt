@@ -24,6 +24,8 @@ data class SeriesDetailsUiState(
     val matureWarningDismissed: Boolean = false,
     val showRatingDialog: Boolean = false,
     val showCommentsSheet: Boolean = false,
+    val continueWatchingText: String? = null,
+    val continueEpisodeId: String? = null,
     val error: String? = null
 )
 
@@ -33,7 +35,8 @@ class SeriesDetailsViewModel(
     private val episodeRepository: EpisodeRepository,
     private val userActionsRepository: UserActionsRepository,
     private val commentRepository: CommentRepository,
-    private val authRepository: AuthRepository
+    private val authRepository: AuthRepository,
+    private val settingsRepository: SettingsRepository? = null
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SeriesDetailsUiState())
@@ -48,9 +51,7 @@ class SeriesDetailsViewModel(
         viewModelScope.launch {
             authRepository.isLoggedIn.collect { loggedIn ->
                 _uiState.update { it.copy(isLoggedIn = loggedIn) }
-                if (loggedIn) {
-                    checkWatchlistStatus()
-                }
+                checkWatchlistStatus()
             }
         }
     }
@@ -93,8 +94,32 @@ class SeriesDetailsViewModel(
                 }
 
                 checkWatchlistStatus()
+                observePlaybackProgress(series.id, episodes)
             } catch (e: Exception) {
                 _uiState.update { it.copy(isLoading = false, error = e.message ?: "Failed to load details") }
+            }
+        }
+    }
+
+    private fun observePlaybackProgress(seriesId: String, episodes: List<Episode>) {
+        if (settingsRepository == null) return
+        viewModelScope.launch {
+            settingsRepository.getSeriesLastPlaybackFlow(seriesId).collect { playbackInfo ->
+                if (playbackInfo != null) {
+                    val (epId, pos, _) = playbackInfo
+                    val targetEp = episodes.find { it.id == epId }
+                    if (targetEp != null && pos > 5) {
+                        val mm = pos / 60
+                        val ss = pos % 60
+                        val timeStr = "%d:%02d".format(mm, ss)
+                        _uiState.update {
+                            it.copy(
+                                continueWatchingText = "Continue from E${targetEp.episodeNumber} · $timeStr",
+                                continueEpisodeId = epId
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -112,54 +137,41 @@ class SeriesDetailsViewModel(
         _uiState.update { it.copy(selectedSeasonNumber = seasonNumber) }
     }
 
-    private fun checkWatchlistStatus() {
+    fun checkWatchlistStatus() {
+        val series = _uiState.value.series ?: return
         viewModelScope.launch {
-            val seriesId = _uiState.value.series?.id ?: return@launch
-            userActionsRepository.getWatchlist().collect { list ->
-                val inList = list.any { it.seriesId == seriesId }
-                _uiState.update { it.copy(isInWatchlist = inList) }
+            userActionsRepository.localWatchlistIdsFlow.collect { watchlistIds ->
+                _uiState.update { it.copy(isInWatchlist = watchlistIds.contains(series.id)) }
             }
         }
     }
 
-    fun toggleWatchlist(onRequireLogin: () -> Unit) {
+    fun toggleWatchlist(onRequireLogin: () -> Unit = {}) {
+        val series = _uiState.value.series ?: return
+        viewModelScope.launch {
+            val isBookmarked = userActionsRepository.toggleWatchlist(series.id).first()
+            _uiState.update { it.copy(isInWatchlist = isBookmarked) }
+        }
+    }
+
+    fun toggleLike(onRequireLogin: () -> Unit = {}) {
+        val series = _uiState.value.series ?: return
         if (!_uiState.value.isLoggedIn) {
             onRequireLogin()
             return
         }
-        val series = _uiState.value.series ?: return
-        val current = _uiState.value.isInWatchlist
-        // Optimistic UI
-        _uiState.update { it.copy(isInWatchlist = !current) }
+        val newLiked = !_uiState.value.isLiked
         viewModelScope.launch {
-            val success = if (!current) {
-                userActionsRepository.addToWatchlist(series.id).first()
-            } else {
-                userActionsRepository.removeFromWatchlist(series.id).first()
-            }
-            if (!success) {
-                _uiState.update { it.copy(isInWatchlist = current) } // rollback
+            val success = userActionsRepository.toggleSeriesLike(series.id, newLiked).first()
+            if (success) {
+                _uiState.update { it.copy(isLiked = newLiked) }
             }
         }
     }
 
-    fun toggleLike(onRequireLogin: () -> Unit) {
-        if (!_uiState.value.isLoggedIn) {
-            onRequireLogin()
-            return
-        }
-        val series = _uiState.value.series ?: return
-        val current = _uiState.value.isLiked
-        _uiState.update { it.copy(isLiked = !current) }
-        viewModelScope.launch {
-            val success = userActionsRepository.toggleSeriesLike(series.id, !current).first()
-            if (!success) {
-                _uiState.update { it.copy(isLiked = current) }
-            }
-        }
-    }
+    fun toggleSeriesLike(onRequireLogin: () -> Unit = {}) = toggleLike(onRequireLogin)
 
-    fun openRatingDialog(onRequireLogin: () -> Unit) {
+    fun openRatingDialog(onRequireLogin: () -> Unit = {}) {
         if (!_uiState.value.isLoggedIn) {
             onRequireLogin()
             return
@@ -171,11 +183,13 @@ class SeriesDetailsViewModel(
         _uiState.update { it.copy(showRatingDialog = false) }
     }
 
-    fun submitRating(score: Int) {
+    fun submitRating(rating: Int) {
         val series = _uiState.value.series ?: return
-        _uiState.update { it.copy(showRatingDialog = false, userRating = score) }
         viewModelScope.launch {
-            userActionsRepository.rateSeries(series.id, score).first()
+            val success = userActionsRepository.rateSeries(series.id, rating).first()
+            if (success) {
+                _uiState.update { it.copy(userRating = rating, showRatingDialog = false) }
+            }
         }
     }
 
@@ -188,7 +202,6 @@ class SeriesDetailsViewModel(
         viewModelScope.launch {
             val success = commentRepository.postComment(series.id, null, null, content).first()
             if (success) {
-                // Refresh comments
                 val updated = commentRepository.getComments(series.id).first()
                 _uiState.update { it.copy(comments = updated) }
             }
@@ -214,11 +227,12 @@ class SeriesDetailsViewModel(
             episodeRepo: EpisodeRepository,
             userActionsRepo: UserActionsRepository,
             commentRepo: CommentRepository,
-            authRepo: AuthRepository
+            authRepo: AuthRepository,
+            settingsRepo: SettingsRepository? = null
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                return SeriesDetailsViewModel(slug, seriesRepo, episodeRepo, userActionsRepo, commentRepo, authRepo) as T
+                return SeriesDetailsViewModel(slug, seriesRepo, episodeRepo, userActionsRepo, commentRepo, authRepo, settingsRepo) as T
             }
         }
     }

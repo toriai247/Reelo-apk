@@ -213,7 +213,8 @@ fun ReeloNavGraph(
                         episodeRepo = container.episodeRepository,
                         userActionsRepo = container.userActionsRepository,
                         commentRepo = container.commentRepository,
-                        authRepo = container.authRepository
+                        authRepo = container.authRepository,
+                        settingsRepo = container.settingsRepository
                     )
                 )
                 SeriesDetailsScreen(

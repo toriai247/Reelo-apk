@@ -58,72 +58,7 @@ fun WatchlistScreen(
         },
         modifier = modifier
     ) { innerPadding ->
-        if (!uiState.isLoggedIn) {
-            // Guest Prompt
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-                    .padding(24.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                ) {
-                    Column(
-                        modifier = Modifier.padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = ReeloYellow.copy(alpha = 0.2f),
-                            modifier = Modifier.size(56.dp)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = Icons.Default.Lock,
-                                    contentDescription = null,
-                                    tint = ReeloYellow,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(16.dp))
-
-                        Text(
-                            text = "Save Series to Your Watchlist",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-
-                        Spacer(modifier = Modifier.height(6.dp))
-
-                        Text(
-                            text = "Sign in with your Reelo account to bookmark your favorite anime, movies, cartoons and dramas, and sync them seamlessly.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-
-                        Spacer(modifier = Modifier.height(20.dp))
-
-                        Button(
-                            onClick = onLoginClick,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = ReeloYellow,
-                                contentColor = ReeloBlack
-                            ),
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier.fillMaxWidth().testTag("watchlist_login_button")
-                        ) {
-                            Text("Sign In or Register", fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-        } else if (uiState.isLoading) {
+        if (uiState.isLoading) {
             Box(
                 modifier = Modifier.fillMaxSize().padding(innerPadding),
                 contentAlignment = Alignment.Center
@@ -143,7 +78,7 @@ fun WatchlistScreen(
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Browse the catalog and tap the bookmark button on any series to add it here.",
+                        text = "Browse titles and tap the bookmark button on any series to save it to your watchlist.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

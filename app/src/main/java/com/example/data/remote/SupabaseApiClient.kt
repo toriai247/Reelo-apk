@@ -171,6 +171,21 @@ class SupabaseApiClient(private val prefs: PreferencesManager) {
         }
     }
 
+    suspend fun getSeriesCardById(seriesId: String): SeriesCard? = withContext(Dispatchers.IO) {
+        val request = createRequest("/rest/v1/series?id=eq.$seriesId&select=*")
+        val json = executeSafe(request)
+        if (json.isNullOrBlank()) return@withContext null
+
+        return@withContext try {
+            val type = Types.newParameterizedType(List::class.java, SeriesCard::class.java)
+            val adapter = moshi.adapter<List<SeriesCard>>(type)
+            adapter.fromJson(json)?.firstOrNull()
+        } catch (e: Exception) {
+            Log.e(tag, "Error parsing series card by id: ${e.message}")
+            null
+        }
+    }
+
     // --- Seasons for Series ---
     suspend fun getSeasons(seriesId: String): List<SeriesSeason> = withContext(Dispatchers.IO) {
         val request = createRequest("/rest/v1/series_seasons?series_id=eq.$seriesId&order=season_number.asc")

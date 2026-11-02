@@ -25,18 +25,18 @@ class WatchlistViewModel(
     val uiState: StateFlow<WatchlistUiState> = _uiState.asStateFlow()
 
     init {
-        observeAuth()
+        observeWatchlist()
     }
 
-    private fun observeAuth() {
+    private fun observeWatchlist() {
         viewModelScope.launch {
             authRepository.isLoggedIn.collect { loggedIn ->
                 _uiState.update { it.copy(isLoggedIn = loggedIn) }
-                if (loggedIn) {
-                    loadWatchlist()
-                } else {
-                    _uiState.update { it.copy(isLoading = false, items = emptyList()) }
-                }
+            }
+        }
+        viewModelScope.launch {
+            userActionsRepository.localWatchlistIdsFlow.collect {
+                loadWatchlist()
             }
         }
     }

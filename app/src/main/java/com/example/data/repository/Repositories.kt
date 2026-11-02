@@ -88,31 +88,58 @@ class UserActionsRepository(
         apiClient.upsertWatchProgress(progress)
     }
 
+    val localWatchlistIdsFlow: Flow<Set<String>> = prefs.localWatchlistIdsFlow
+
     fun getWatchlist(): Flow<List<WatchlistItem>> = flow {
+        val localIds = prefs.localWatchlistIdsFlow.first()
         val userId = prefs.userIdFlow.first()
-        if (userId.isNullOrBlank()) {
-            emit(emptyList())
-        } else {
-            emit(apiClient.getWatchlist(userId))
+        val remoteItems = if (!userId.isNullOrBlank()) {
+            runCatching { apiClient.getWatchlist(userId) }.getOrDefault(emptyList())
+        } else emptyList()
+
+        val remoteIds = remoteItems.map { it.seriesId }.toSet()
+        val combinedIds = localIds + remoteIds
+
+        val items = combinedIds.mapNotNull { sId ->
+            val remoteItem = remoteItems.find { it.seriesId == sId }
+            if (remoteItem != null) {
+                remoteItem
+            } else {
+                val seriesCard = runCatching { apiClient.getSeriesCardById(sId) }.getOrNull()
+                seriesCard?.let { WatchlistItem(userId = userId ?: "local", seriesId = sId, series = it) }
+            }
         }
+        emit(items)
+    }
+
+    fun toggleWatchlist(seriesId: String): Flow<Boolean> = flow {
+        val isBookmarked = prefs.toggleLocalWatchlist(seriesId)
+        val userId = prefs.userIdFlow.first()
+        if (!userId.isNullOrBlank()) {
+            runCatching {
+                if (isBookmarked) apiClient.addToWatchlist(userId, seriesId)
+                else apiClient.removeFromWatchlist(userId, seriesId)
+            }
+        }
+        emit(isBookmarked)
     }
 
     fun addToWatchlist(seriesId: String): Flow<Boolean> = flow {
+        prefs.toggleLocalWatchlist(seriesId)
         val userId = prefs.userIdFlow.first()
-        if (userId.isNullOrBlank()) {
-            emit(false)
-        } else {
-            emit(apiClient.addToWatchlist(userId, seriesId))
+        if (!userId.isNullOrBlank()) {
+            runCatching { apiClient.addToWatchlist(userId, seriesId) }
         }
+        emit(true)
     }
 
     fun removeFromWatchlist(seriesId: String): Flow<Boolean> = flow {
+        prefs.removeFromLocalWatchlist(seriesId)
         val userId = prefs.userIdFlow.first()
-        if (userId.isNullOrBlank()) {
-            emit(false)
-        } else {
-            emit(apiClient.removeFromWatchlist(userId, seriesId))
+        if (!userId.isNullOrBlank()) {
+            runCatching { apiClient.removeFromWatchlist(userId, seriesId) }
         }
+        emit(true)
     }
 
     fun rateSeries(seriesId: String, rating: Int): Flow<Boolean> = flow {
@@ -192,6 +219,33 @@ class SettingsRepository(
 
     val useSecureDns: Flow<Boolean> = prefs.useSecureDnsFlow
     suspend fun setUseSecureDns(enabled: Boolean) = prefs.setUseSecureDns(enabled)
+
+    val stayOnOriginalSite: Flow<Boolean> = prefs.stayOnOriginalSiteFlow
+    suspend fun setStayOnOriginalSite(stay: Boolean) = prefs.setStayOnOriginalSite(stay)
+
+    val adCleanerEnabled: Flow<Boolean> = prefs.adCleanerEnabledFlow
+    suspend fun setAdCleanerEnabled(enabled: Boolean) = prefs.setAdCleanerEnabled(enabled)
+
+    val popupGatedPlayers: Flow<Boolean> = prefs.popupGatedPlayersFlow
+    suspend fun setPopupGatedPlayers(enabled: Boolean) = prefs.setPopupGatedPlayers(enabled)
+
+    val braveDontShowAgain: Flow<Boolean> = prefs.braveDontShowAgainFlow
+    suspend fun setBraveDontShowAgain(dontShow: Boolean) = prefs.setBraveDontShowAgain(dontShow)
+
+    suspend fun getBraveLastShownTime(): Long = prefs.getBraveLastShownTime()
+    suspend fun updateBraveLastShownTime(timestamp: Long = System.currentTimeMillis()) = prefs.updateBraveLastShownTime(timestamp)
+
+    val disabledShieldHosts: Flow<Set<String>> = prefs.disabledShieldHostsFlow
+    suspend fun toggleShieldForHost(host: String): Boolean = prefs.toggleShieldForHost(host)
+
+    suspend fun saveEpisodePlayback(episodeId: String, seriesId: String, positionSec: Int, durationSec: Int) =
+        prefs.saveEpisodePlayback(episodeId, seriesId, positionSec, durationSec)
+
+    suspend fun getEpisodePlayback(episodeId: String): Pair<Int, Int>? =
+        prefs.getEpisodePlayback(episodeId)
+
+    fun getSeriesLastPlaybackFlow(seriesId: String): Flow<Triple<String, Int, Int>?> =
+        prefs.getSeriesLastPlaybackFlow(seriesId)
 
     val railsExpanded: Flow<Boolean> = prefs.railsExpandedFlow
     suspend fun setRailsExpanded(expanded: Boolean) = prefs.setRailsExpanded(expanded)
