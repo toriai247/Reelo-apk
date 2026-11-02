@@ -2,6 +2,7 @@ package com.example.ui.screens.watch
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.net.Uri
@@ -10,6 +11,9 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.*
+import androidx.webkit.ProxyConfig
+import androidx.webkit.ProxyController
+import androidx.webkit.WebViewFeature
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInHorizontally
@@ -88,6 +92,37 @@ fun WatchScreen(
                 insetsController.show(WindowInsetsCompat.Type.systemBars())
             }
             webViewRef?.destroy()
+        }
+    }
+
+    // Configure Local DoH Proxy for WebView
+    DisposableEffect(uiState.useSecureDns) {
+        if (uiState.useSecureDns && WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+            val port = viewModel.startLocalProxy()
+            if (port > 0) {
+                val proxyConfig = ProxyConfig.Builder()
+                    .addProxyRule("127.0.0.1:$port")
+                    .build()
+                runCatching {
+                    ProxyController.getInstance().setProxyOverride(proxyConfig, { runnable -> runnable.run() }, {})
+                }
+            }
+        } else {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+                runCatching {
+                    ProxyController.getInstance().clearProxyOverride({ runnable -> runnable.run() }, {})
+                }
+            }
+            viewModel.stopLocalProxy()
+        }
+
+        onDispose {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+                runCatching {
+                    ProxyController.getInstance().clearProxyOverride({ runnable -> runnable.run() }, {})
+                }
+            }
+            viewModel.stopLocalProxy()
         }
     }
 
@@ -413,9 +448,15 @@ fun WatchScreen(
                                             viewModel.onWebPageError("SSL Security Verification Failed")
                                         }
 
-                                        override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                                         override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                                             if (request?.isForMainFrame == true) {
-                                                viewModel.onWebPageError("Failed to load stream page (${error?.description})")
+                                                val description = error?.description?.toString() ?: ""
+                                                val errorCode = error?.errorCode
+                                                if (errorCode == ERROR_HOST_LOOKUP || description.contains("ERR_NAME_NOT_RESOLVED", ignoreCase = true)) {
+                                                    viewModel.handleDnsError()
+                                                } else {
+                                                    viewModel.onWebPageError("Failed to load stream page ($description)")
+                                                }
                                             }
                                         }
 
@@ -480,7 +521,10 @@ fun WatchScreen(
                                     fontWeight = FontWeight.Bold
                                 )
                                 Spacer(modifier = Modifier.height(16.dp))
-                                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
                                     Button(
                                         onClick = { viewModel.tryNextServer() },
                                         colors = ButtonDefaults.buttonColors(
@@ -498,6 +542,26 @@ fun WatchScreen(
                                         colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
                                     ) {
                                         Text("Retry")
+                                    }
+                                    OutlinedButton(
+                                        onClick = {
+                                            val currentSource = uiState.currentSource
+                                            if (!currentSource?.url.isNullOrBlank()) {
+                                                runCatching {
+                                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(currentSource!!.url))
+                                                    context.startActivity(intent)
+                                                }
+                                            }
+                                        },
+                                        colors = ButtonDefaults.outlinedButtonColors(contentColor = ReeloYellow)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.OpenInNew,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Open in Chrome")
                                     }
                                 }
                             }

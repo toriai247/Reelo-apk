@@ -14,6 +14,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
+import com.example.data.proxy.DohResolver
+import com.example.data.proxy.LocalDohProxyServer
+
 data class WatchUiState(
     val isLoading: Boolean = true,
     val series: Series? = null,
@@ -28,6 +31,10 @@ data class WatchUiState(
     val isCompleted: Boolean = false,
     val railsExpanded: Boolean = true,
     val allowPopups: Boolean = false,
+    val useSecureDns: Boolean = true,
+    val isProxyActive: Boolean = false,
+    val proxyPort: Int = 0,
+    val autoRetryAttempted: Boolean = false,
     val showServersSheet: Boolean = false,
     val showReportDialog: Boolean = false,
     val webViewProgress: Int = 0,
@@ -48,6 +55,9 @@ class WatchViewModel(
     private val _uiState = MutableStateFlow(WatchUiState())
     val uiState: StateFlow<WatchUiState> = _uiState.asStateFlow()
 
+    private val dohResolver = DohResolver()
+    private val localProxyServer = LocalDohProxyServer(dohResolver)
+
     private var progressTrackingJob: Job? = null
     private var secondsWatched: Int = 6
 
@@ -66,6 +76,45 @@ class WatchViewModel(
             settingsRepository.allowPopups.collect { allowed ->
                 _uiState.update { it.copy(allowPopups = allowed) }
             }
+        }
+        viewModelScope.launch {
+            settingsRepository.useSecureDns.collect { secureDns ->
+                _uiState.update { it.copy(useSecureDns = secureDns) }
+            }
+        }
+    }
+
+    fun startLocalProxy(): Int {
+        val assignedPort = localProxyServer.start()
+        _uiState.update { it.copy(isProxyActive = assignedPort > 0, proxyPort = assignedPort) }
+        return assignedPort
+    }
+
+    fun stopLocalProxy() {
+        localProxyServer.stop()
+        _uiState.update { it.copy(isProxyActive = false, proxyPort = 0) }
+    }
+
+    fun handleDnsError() {
+        val state = _uiState.value
+        if (!state.autoRetryAttempted && !state.isProxyActive) {
+            viewModelScope.launch {
+                settingsRepository.setUseSecureDns(true)
+                _uiState.update { it.copy(autoRetryAttempted = true, hasError = false, errorMessage = null) }
+            }
+        } else {
+            _uiState.update {
+                it.copy(
+                    hasError = true,
+                    errorMessage = "DNS lookup failed (net::ERR_NAME_NOT_RESOLVED). Check internet connection or try next server."
+                )
+            }
+        }
+    }
+
+    fun setUseSecureDns(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.setUseSecureDns(enabled)
         }
     }
 
@@ -291,6 +340,7 @@ class WatchViewModel(
     override fun onCleared() {
         super.onCleared()
         progressTrackingJob?.cancel()
+        localProxyServer.stop()
     }
 
     companion object {

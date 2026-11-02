@@ -15,6 +15,7 @@ data class ProfileUiState(
     val profile: Profile? = null,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val allowPopups: Boolean = false,
+    val useSecureDns: Boolean = true,
     val showAuthDialog: Boolean = false,
     val isAuthLoading: Boolean = false,
     val authError: String? = null,
@@ -54,6 +55,11 @@ class ProfileViewModel(
                 _uiState.update { it.copy(allowPopups = allowed) }
             }
         }
+        viewModelScope.launch {
+            settingsRepository.useSecureDns.collect { secureDns ->
+                _uiState.update { it.copy(useSecureDns = secureDns) }
+            }
+        }
     }
 
     fun setThemeMode(mode: ThemeMode) {
@@ -65,6 +71,12 @@ class ProfileViewModel(
     fun setAllowPopups(allow: Boolean) {
         viewModelScope.launch {
             settingsRepository.setAllowPopups(allow)
+        }
+    }
+
+    fun setUseSecureDns(useSecure: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.setUseSecureDns(useSecure)
         }
     }
 

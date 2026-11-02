@@ -250,7 +250,35 @@ fun ProfileScreen(
                     shape = RoundedCornerShape(12.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                 ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Secure DNS (Fix Blocked Sites)", fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    text = "Bypasses ISP DNS blocks using Cloudflare & Google DNS-over-HTTPS.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = uiState.useSecureDns,
+                                onCheckedChange = { viewModel.setUseSecureDns(it) },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = ReeloBlack,
+                                    checkedTrackColor = ReeloYellow
+                                )
+                            )
+                        }
+
+                        Divider(color = MaterialTheme.colorScheme.outlineVariant)
+
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,

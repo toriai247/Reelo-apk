@@ -190,6 +190,9 @@ class SettingsRepository(
     val allowPopups: Flow<Boolean> = prefs.allowPopupsFlow
     suspend fun setAllowPopups(allow: Boolean) = prefs.setAllowPopups(allow)
 
+    val useSecureDns: Flow<Boolean> = prefs.useSecureDnsFlow
+    suspend fun setUseSecureDns(enabled: Boolean) = prefs.setUseSecureDns(enabled)
+
     val railsExpanded: Flow<Boolean> = prefs.railsExpandedFlow
     suspend fun setRailsExpanded(expanded: Boolean) = prefs.setRailsExpanded(expanded)
 

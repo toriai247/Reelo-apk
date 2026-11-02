@@ -45,10 +45,18 @@ class PreferencesManager(private val context: Context) {
         context.dataStore.edit { it[KEY_THEME] = mode.name }
     }
 
+    private val KEY_USE_SECURE_DNS = booleanPreferencesKey("use_secure_dns")
+
     val allowPopupsFlow: Flow<Boolean> = context.dataStore.data.map { it[KEY_ALLOW_POPUPS] ?: false }
 
     suspend fun setAllowPopups(allow: Boolean) {
         context.dataStore.edit { it[KEY_ALLOW_POPUPS] = allow }
+    }
+
+    val useSecureDnsFlow: Flow<Boolean> = context.dataStore.data.map { it[KEY_USE_SECURE_DNS] ?: true }
+
+    suspend fun setUseSecureDns(enabled: Boolean) {
+        context.dataStore.edit { it[KEY_USE_SECURE_DNS] = enabled }
     }
 
     val railsExpandedFlow: Flow<Boolean> = context.dataStore.data.map { it[KEY_RAILS_EXPANDED] ?: true }
