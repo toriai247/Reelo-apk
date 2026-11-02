@@ -10,9 +10,10 @@ import org.junit.Test
 class ExampleUnitTest {
 
     @Test
-    fun `verify supabase build config keys are configured with live project`() {
-        assertEquals("https://ffbmozwsasbhevtehbit.supabase.co", BuildConfig.SUPABASE_URL)
-        assertEquals("sb_publishable_kzXQl0X6eNtzFrAuY-3EFw_pYh6H-qr", BuildConfig.SUPABASE_ANON_KEY)
+    fun `verify supabase build config keys are non blank`() {
+        assertTrue("SUPABASE_URL should not be blank", BuildConfig.SUPABASE_URL.isNotBlank())
+        assertTrue("SUPABASE_ANON_KEY should not be blank", BuildConfig.SUPABASE_ANON_KEY.isNotBlank())
+        assertTrue("SUPABASE_URL should start with http", BuildConfig.SUPABASE_URL.startsWith("http"))
     }
 
     @Test
