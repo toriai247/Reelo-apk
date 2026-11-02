@@ -17,6 +17,11 @@ import kotlinx.coroutines.launch
 import com.example.data.proxy.DohResolver
 import com.example.data.proxy.LocalDohProxyServer
 
+enum class UserAgentMode(val label: String, val value: String) {
+    MOBILE("Mobile", "Mozilla/5.0 (Linux; Android 14; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0 Chrome/124.0.0.0 Mobile Safari/537.36"),
+    DESKTOP("Desktop", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+}
+
 data class WatchUiState(
     val isLoading: Boolean = true,
     val series: Series? = null,
@@ -39,7 +44,15 @@ data class WatchUiState(
     val showReportDialog: Boolean = false,
     val webViewProgress: Int = 0,
     val hasError: Boolean = false,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val isLandscapeMode: Boolean = false, // Default to 9:16 portrait vertical reel
+    val userAgentMode: UserAgentMode = UserAgentMode.MOBILE,
+    val isLiked: Boolean = false,
+    val heartAnimationCoordinates: Pair<Float, Float>? = null,
+    val comments: List<com.example.data.model.SeriesComment> = emptyList(),
+    val showCommentsSheet: Boolean = false,
+    val isUserLoggedIn: Boolean = false,
+    val reportSubmittedToast: String? = null
 )
 
 class WatchViewModel(
@@ -49,7 +62,9 @@ class WatchViewModel(
     private val episodeRepository: EpisodeRepository,
     private val sourceRepository: SourceRepository,
     private val userActionsRepository: UserActionsRepository,
-    private val settingsRepository: SettingsRepository
+    private val settingsRepository: SettingsRepository,
+    private val commentRepository: CommentRepository? = null,
+    private val authRepository: AuthRepository? = null
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(WatchUiState())
@@ -237,6 +252,43 @@ class WatchViewModel(
         }
     }
 
+    fun previousEpisode() {
+        val episodes = _uiState.value.episodes
+        val currentEp = _uiState.value.currentEpisode ?: return
+        val prev = episodes.find {
+            it.seasonNumber == currentEp.seasonNumber && it.episodeNumber == currentEp.episodeNumber - 1
+        } ?: episodes.filter { it.seasonNumber == currentEp.seasonNumber - 1 }.maxByOrNull { it.episodeNumber }
+        if (prev != null) {
+            selectEpisode(prev)
+        }
+    }
+
+    fun toggleLandscapeMode() {
+        _uiState.update { it.copy(isLandscapeMode = !it.isLandscapeMode) }
+    }
+
+    fun setLandscapeMode(landscape: Boolean) {
+        _uiState.update { it.copy(isLandscapeMode = landscape) }
+    }
+
+    fun toggleUserAgentMode() {
+        val newMode = if (_uiState.value.userAgentMode == UserAgentMode.MOBILE) UserAgentMode.DESKTOP else UserAgentMode.MOBILE
+        _uiState.update { it.copy(userAgentMode = newMode) }
+    }
+
+    fun toggleLike(x: Float? = null, y: Float? = null) {
+        val newLikedState = !_uiState.value.isLiked
+        val coords = if (x != null && y != null) Pair(x, y) else null
+        _uiState.update { it.copy(isLiked = newLikedState, heartAnimationCoordinates = coords) }
+        viewModelScope.launch {
+            userActionsRepository.toggleSeriesLike(seriesId, newLikedState).collect {}
+        }
+    }
+
+    fun dismissHeartAnimation() {
+        _uiState.update { it.copy(heartAnimationCoordinates = null) }
+    }
+
     fun toggleRailsExpanded() {
         val current = _uiState.value.railsExpanded
         viewModelScope.launch {
@@ -264,7 +316,67 @@ class WatchViewModel(
         val source = _uiState.value.currentSource ?: return
         viewModelScope.launch {
             sourceRepository.reportSource(source.id, reason, details).first()
-            _uiState.update { it.copy(showReportDialog = false) }
+            _uiState.update { it.copy(showReportDialog = false, reportSubmittedToast = "Report submitted! Thank you.") }
+        }
+    }
+
+    fun dismissReportToast() {
+        _uiState.update { it.copy(reportSubmittedToast = null) }
+    }
+
+    fun toggleCommentsSheet(show: Boolean) {
+        _uiState.update { it.copy(showCommentsSheet = show) }
+        if (show) {
+            loadComments()
+        }
+    }
+
+    fun loadComments() {
+        val commentRepo = commentRepository ?: return
+        viewModelScope.launch {
+            val currentEpId = _uiState.value.currentEpisode?.id
+            commentRepo.getComments(seriesId, currentEpId).collect { list ->
+                _uiState.update { it.copy(comments = list) }
+            }
+        }
+    }
+
+    fun postComment(content: String) {
+        val commentRepo = commentRepository ?: return
+        val authRepo = authRepository ?: return
+        viewModelScope.launch {
+            val profile = authRepo.currentUserProfile.first()
+            val author = profile?.let { com.example.data.model.CommentAuthor(username = it.username, displayName = it.displayName, avatarUrl = it.avatarUrl) }
+            val newComment = com.example.data.model.SeriesComment(
+                id = "temp_${System.currentTimeMillis()}",
+                seriesId = seriesId,
+                episodeId = _uiState.value.currentEpisode?.id,
+                userId = profile?.id ?: "user",
+                content = content,
+                likesCount = 0,
+                isLikedByMe = false,
+                profiles = author
+            )
+            _uiState.update { it.copy(comments = listOf(newComment) + it.comments) }
+            commentRepo.postComment(seriesId, _uiState.value.currentEpisode?.id, null, content).first()
+        }
+    }
+
+    fun toggleCommentLike(comment: com.example.data.model.SeriesComment) {
+        val commentRepo = commentRepository ?: return
+        val updatedLikedState = !comment.isLikedByMe
+        val updatedCount = if (updatedLikedState) comment.likesCount + 1 else (comment.likesCount - 1).coerceAtLeast(0)
+
+        _uiState.update { state ->
+            state.copy(
+                comments = state.comments.map {
+                    if (it.id == comment.id) it.copy(isLikedByMe = updatedLikedState, likesCount = updatedCount) else it
+                }
+            )
+        }
+
+        viewModelScope.launch {
+            commentRepo.likeComment(comment.id, updatedLikedState).first()
         }
     }
 
@@ -351,11 +463,23 @@ class WatchViewModel(
             episodeRepo: EpisodeRepository,
             sourceRepo: SourceRepository,
             userActionsRepo: UserActionsRepository,
-            settingsRepo: SettingsRepository
+            settingsRepo: SettingsRepository,
+            commentRepo: CommentRepository? = null,
+            authRepo: AuthRepository? = null
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                return WatchViewModel(seriesId, initialEpisodeId, seriesRepo, episodeRepo, sourceRepo, userActionsRepo, settingsRepo) as T
+                return WatchViewModel(
+                    seriesId,
+                    initialEpisodeId,
+                    seriesRepo,
+                    episodeRepo,
+                    sourceRepo,
+                    userActionsRepo,
+                    settingsRepo,
+                    commentRepo,
+                    authRepo
+                ) as T
             }
         }
     }

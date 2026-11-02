@@ -237,7 +237,7 @@ fun ShelfHeroCarousel(
             state = pagerState,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(230.dp)
+                .height(380.dp)
         ) { page ->
             val series = items[page]
             Box(
@@ -252,15 +252,16 @@ fun ShelfHeroCarousel(
                     modifier = Modifier.fillMaxSize()
                 )
 
-                // Dark multi-stop gradient for text and button visibility
+                // Dark multi-stop top and bottom gradients for logo and button visibility
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(
                             Brush.verticalGradient(
                                 colors = listOf(
-                                    Color.Black.copy(alpha = 0.2f),
-                                    Color.Black.copy(alpha = 0.5f),
+                                    Color.Black.copy(alpha = 0.75f),
+                                    Color.Transparent,
+                                    Color.Black.copy(alpha = 0.4f),
                                     Color.Black.copy(alpha = 0.95f)
                                 )
                             )

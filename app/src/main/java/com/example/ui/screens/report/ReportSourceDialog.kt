@@ -1,6 +1,5 @@
 package com.example.ui.screens.report
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -14,6 +13,7 @@ import androidx.compose.ui.unit.sp
 import com.example.ui.theme.ReeloBlack
 import com.example.ui.theme.ReeloYellow
 
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun ReportSourceDialog(
     sourceLabel: String,
@@ -21,10 +21,11 @@ fun ReportSourceDialog(
     onSubmit: (reason: String, details: String?) -> Unit
 ) {
     val reasons = listOf(
-        "broken" to "Video does not load / Broken link",
-        "wrong_episode" to "Wrong episode or mismatched audio",
-        "copyright" to "Copyright or DMCA issue",
-        "other" to "Other playback issue"
+        "broken" to "Broken Video / Link",
+        "wrong_episode" to "Wrong Audio / Episode",
+        "copyright" to "DMCA / Copyright",
+        "buffering" to "Buffering / Freeze",
+        "other" to "Other Issue"
     )
 
     var selectedReason by remember { mutableStateOf("broken") }
@@ -34,7 +35,7 @@ fun ReportSourceDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                text = "Report Server Issue",
+                text = "Report Problem",
                 fontWeight = FontWeight.Bold,
                 fontSize = 18.sp
             )
@@ -42,7 +43,7 @@ fun ReportSourceDialog(
         text = {
             Column(
                 modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
                     text = "Server: $sourceLabel",
@@ -50,30 +51,31 @@ fun ReportSourceDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
-                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Select reason:",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
 
-                reasons.forEach { (key, label) ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { selectedReason = key }
-                            .padding(vertical = 4.dp)
-                    ) {
-                        RadioButton(
-                            selected = selectedReason == key,
+                // Reason Filter Chips
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    reasons.forEach { (key, label) ->
+                        val isSelected = selectedReason == key
+                        FilterChip(
+                            selected = isSelected,
                             onClick = { selectedReason = key },
-                            colors = RadioButtonDefaults.colors(selectedColor = ReeloYellow)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = label,
-                            style = MaterialTheme.typography.bodyMedium
+                            label = { Text(label, fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = ReeloYellow,
+                                selectedLabelColor = ReeloBlack
+                            )
                         )
                     }
                 }
-
-                Spacer(modifier = Modifier.height(8.dp))
 
                 OutlinedTextField(
                     value = detailsText,
